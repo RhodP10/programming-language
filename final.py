@@ -1209,8 +1209,13 @@ if __name__ == "__main__":
                                 else:
                                      # Print a newline for clarity even if no explicit result is printed
                                      print("\n", end="")
+                            # --- MODIFICATION: Catch ZeroDivisionError specifically ---
+                            except ZeroDivisionError as e:
+                                print(f"{e}", file=sys.stderr) # Print exact error message without "Error -"
+                                break # Stop processing after a runtime error
+                            # --- END MODIFICATION ---
                             except (SyntaxError, Exception) as e:
-                                # Catch errors during evaluation of individual statements
+                                # Catch other errors (SyntaxError and other Exceptions)
                                 print(f"Error - {e}", file=sys.stderr)
                                 # Stop processing the rest of the statements in the file after an error
                                 break
@@ -1226,6 +1231,10 @@ if __name__ == "__main__":
                                  print(f"Evaluation: {result_str}\n")
                              else:
                                  print("\n", end="")
+                         # --- MODIFICATION: Catch ZeroDivisionError specifically ---
+                         except ZeroDivisionError as e:
+                              print(f"{e}", file=sys.stderr) # Print exact error message without "Error -"
+                         # --- END MODIFICATION ---
                          except (SyntaxError, Exception) as e:
                              print(f"Error - {e}", file=sys.stderr)
 
@@ -1317,18 +1326,27 @@ if __name__ == "__main__":
                     print(f"AST: {repr(ast)}")
                     # --- End of AST Output ---
 
-                    result = evaluate(ast)
+                    try:
+                        result = evaluate(ast)
 
-                    # Only print evaluation result if it's not None (e.g., not a print statement)
-                    if result is not None:
-                        if isinstance(result, bool):
-                            result_str = "true" if result else "false"
+                        # Only print evaluation result if it's not None (e.g., not a print statement)
+                        if result is not None:
+                            if isinstance(result, bool):
+                                result_str = "true" if result else "false"
+                            else:
+                                result_str = str(result)
+                            print(f"Evaluation: {result_str}\n")
                         else:
-                            result_str = str(result)
-                        print(f"Evaluation: {result_str}\n")
-                    else:
-                         # Print a newline for clarity even if no explicit result is printed
-                         print("\n", end="")
+                             # Print a newline for clarity even if no explicit result is printed
+                             print("\n", end="")
+
+                    # --- MODIFICATION: Catch ZeroDivisionError specifically in REPL ---
+                    except ZeroDivisionError as e:
+                         print(f"{e}\n", file=sys.stderr) # Print exact error message with newline
+                    # --- END MODIFICATION ---
+                    except Exception as e: # Catch other Exceptions (runtime errors)
+                         # Print other errors with the "Error -" prefix
+                         print(f"Error - {e}\n", file=sys.stderr)
 
 
                     input_buffer = "" # Clear the buffer after successful execution
