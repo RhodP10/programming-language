@@ -8,10 +8,12 @@ import sys # Import sys for handling input in a more controlled way
 # dot operator, tracks line numbers, explicitly handles comments and whitespace,
 # and improves invalid token detection.
 # FIX: Reordered regex to prioritize matching comments (//.*) before general operators (like /)
-TOKEN_REGEX = r'(\'(?:\\.|[^\'\\])*\')|(\"(?:\\.|[^\"\\])*\")|(//.*)|(\d+)|([a-zA-Z_]+)|(==|!=|&&|\|\||[+\-*/^()=<>!&|{},;.])|(\s+)|(.)'
+# --- MODIFICATION: Added '[' and ']' to the operator group ---
+TOKEN_REGEX = r'(\'(?:\\.|[^\'\\])*\')|(\"(?:\\.|[^\"\\])*\")|(//.*)|(\d+)|([a-zA-Z_]+)|(==|!=|&&|\|\||[+\-*/^()=<>!&|{},;.\[\]])|(\s+)|(.)'
+# --- END MODIFICATION ---
 # Added ('\"(?:\\.|[^\"\\])*\"') to match double-quoted strings
-# --- MODIFICATION: Added 'null' to KEYWORDS ---
-KEYWORDS = {"function", "struct", "return", "for", "if", "else", "true", "false", "not", "and", "or", "let", "while", "input", "null"}
+# --- MODIFICATION: Added 'null' and 'delete' to KEYWORDS ---
+KEYWORDS = {"function", "struct", "return", "for", "if", "else", "true", "false", "not", "and", "or", "let", "while", "input", "null", "delete"}
 # --- END MODIFICATION ---
 
 def tokenize(expression):
@@ -158,6 +160,37 @@ class NullLiteral(ASTNode):
         return "null"
 # --- END NEW AST Node ---
 
+# --- NEW AST Node for Delete ---
+class DeleteCall(ASTNode):
+    """Represents a delete function call node in the AST."""
+    def __init__(self, name, line_num=None):
+        super().__init__(line_num)
+        self.name = name # Should be a Variable node
+    def __repr__(self):
+        return f"Delete({repr(self.name)})"
+# --- END NEW AST Node ---
+
+# --- NEW AST Node for List Literal ---
+class ListLiteral(ASTNode):
+    """Represents a list literal node in the AST."""
+    def __init__(self, elements, line_num=None):
+        super().__init__(line_num)
+        self.elements = elements
+    def __repr__(self):
+        return f"List([{', '.join(map(repr, self.elements))}])"
+# --- END NEW AST Node ---
+
+# --- NEW AST Node for Index Access ---
+class IndexAccess(ASTNode):
+    """Represents an index access (e.g., list[index]) node in the AST."""
+    def __init__(self, base, index, line_num=None):
+        super().__init__(line_num)
+        self.base = base # The expression for the list/array
+        self.index = index # The expression for the index
+    def __repr__(self):
+        return f"IndexAccess({repr(self.base)}, {repr(self.index)})"
+# --- END NEW AST Node ---
+
 
 class Variable(ASTNode):
     """Represents a variable node in the AST."""
@@ -282,6 +315,9 @@ class WhileLoop(ASTNode):
 symbol_table = {}
 function_table = {}
 struct_table = {}
+
+# Set to keep track of deleted variable names
+deleted_variables = set() # Moved this to global scope
 
 # Dummy function definition for 'add' (expects 2 arguments) to simulate expected error.
 # This is for demonstrating semantic error handling.
@@ -464,6 +500,27 @@ class Parser:
         return WhileLoop(condition, body, line_num)
     # --- End New Parsing Logic ---
 
+    # --- New Parsing Logic for Delete ---
+    def parse_delete_call(self):
+        """
+        Parses a delete function call.
+
+        Returns:
+            DeleteCall: An AST node representing the delete call.
+
+        Raises:
+            SyntaxError: If the delete call syntax is invalid.
+        """
+        line_num = self.eat("delete")
+        self.eat("(")
+        # Expect a single argument which must be a variable
+        arg = self.parse_expression(0)
+        if not isinstance(arg, Variable):
+             raise SyntaxError(f"Syntax error on line {self.current_line_num()}: delete() expects a variable name as argument")
+        self.eat(")")
+        return DeleteCall(arg, line_num)
+    # --- End New Parsing Logic ---
+
 
     def parse_block(self):
         """
@@ -481,7 +538,7 @@ class Parser:
             statements.append(self.parse_statement())
             if self.current() == ';':
                 self.eat(";")
-            # Allow statements in a block without trailing semicolon if it's the last statement before '}'
+            # Allow multiple statements in a block without trailing semicolon if it's the last statement before '}'
             elif self.current() != '}':
                  raise SyntaxError(f"Syntax error on line {self.current_line_num()}: Expected ';' or '}}'")
         self.eat("}")
@@ -555,6 +612,10 @@ class Parser:
         elif self.current() == "while":
             return self.parse_while_loop()
         # --- End Add Parsing ---
+        # --- Add Parsing for Delete ---
+        elif self.current() == "delete":
+             return self.parse_delete_call()
+        # --- End Add Parsing ---
         else:
             # Assume it's an expression statement
             expr = self.parse_expression(0)
@@ -614,15 +675,15 @@ class Parser:
             line_num = self.eat('=')
             right = self.parse_expression(0)
             # Check if the left side is a variable or a member access for assignment
-            if not isinstance(left, (Variable, MemberAccess)):
-                raise SyntaxError(f"Syntax error on line {line_num}: Left-hand side of assignment must be a variable or member access")
+            if not isinstance(left, (Variable, MemberAccess, IndexAccess)): # --- MODIFICATION: Added IndexAccess to allowed LHS ---
+                raise SyntaxError(f"Syntax error on line {line_num}: Left-hand side of assignment must be a variable, member access, or index access")
             # If it's a variable, create an Assignment node
             if isinstance(left, Variable):
                 # Note: For simple assignment like `x = 5;`, the Variable node `x` is returned from parse_primary.
                 # The Assignment node is created here. The symbol table update happens during evaluation.
                 left = Assignment(left.name, right, line_num)
-            # If it's a member access, the assignment will happen during evaluation
-            return left # Return the Assignment or MemberAccess node
+            # If it's a member access or index access, the assignment will happen during evaluation
+            return left # Return the Assignment, MemberAccess, or IndexAccess node
 
         while self.current() and self.current() in PRECEDENCE:
             current_token = self.current()
@@ -651,7 +712,7 @@ class Parser:
 
     def parse_primary(self):
         """
-        Parses a primary expression (literals, variables, function calls, parenthesized expressions).
+        Parses a primary expression (literals, variables, function calls, parenthesized expressions, lists, index access).
 
         Returns:
             ASTNode: An AST node representing the primary expression.
@@ -684,6 +745,19 @@ class Parser:
              self.eat("null")
              left = NullLiteral(line_num)
         # --- END MODIFICATION ---
+        # --- MODIFICATION: Handle List Literal ---
+        elif token == '[':
+             line_num = self.eat('[')
+             elements = []
+             while self.current() != ']':
+                  elements.append(self.parse_expression(0))
+                  if self.current() == ',':
+                       self.eat(',')
+                  elif self.current() != ']':
+                       raise SyntaxError(f"Syntax error on line {self.current_line_num()}: Expected ',' or ']' in list literal")
+             self.eat(']')
+             left = ListLiteral(elements, line_num)
+        # --- END MODIFICATION ---
         elif token and token.isdigit():
             self.eat(token)
             left = Number(int(token), line_num)
@@ -699,21 +773,40 @@ class Parser:
                     elif self.current() != ')': # Ensure comma or closing parenthesis after argument
                          raise SyntaxError(f"Syntax error on line {self.current_line_num()}: Expected ',' or ')' after function argument")
                 self.eat(')')
+                # --- MODIFICATION: Check for 'delete' as a function call here ---
+                if token == "delete":
+                     # If it's a delete call, the parsing logic for delete() is handled in parse_statement,
+                     # but if it's encountered as part of an expression (e.g., `x = delete(y);`),
+                     # this would be an error in a real language. For simplicity, we'll assume delete
+                     # is only used as a statement and handle it in parse_statement.
+                     # If we were to support `x = delete(y);`, we'd need a different AST node and evaluation logic.
+                     raise SyntaxError(f"Syntax error on line {line_num}: delete() can only be used as a statement")
+                # --- END MODIFICATION ---
                 left = FunctionCall(token, args, line_num)
             else:
                 left = Variable(token, line_num)
         else:
             raise SyntaxError(f"Syntax error on line {line_num}: Unexpected token: {token}")
         # -----------------------------
-        # Member Access Handling (dot operator)
+        # Member Access Handling (dot operator) and Index Access Handling
         # -----------------------------
-        while self.current() == '.':
-            self.eat('.')
-            member, member_line_num = self.current_token_info()
-            if not member or not member.isidentifier():
-                raise SyntaxError(f"Syntax error on line {member_line_num}: Expected member name after '.'")
-            self.eat(member)
-            left = MemberAccess(left, member, line_num) # Use line_num of the base for the MemberAccess node
+        while self.current() == '.' or self.current() == '[':
+            if self.current() == '.':
+                 self.eat('.')
+                 member, member_line_num = self.current_token_info()
+                 if not member or not member.isidentifier():
+                     raise SyntaxError(f"Syntax error on line {member_line_num}: Expected member name after '.'")
+                 self.eat(member)
+                 left = MemberAccess(left, member, line_num) # Use line_num of the base for the MemberAccess node
+            # --- MODIFICATION: Handle Index Access ---
+            elif self.current() == '[':
+                 line_num = self.eat('[')
+                 index = self.parse_expression(0)
+                 if self.current() != ']':
+                      raise SyntaxError(f"Syntax error on line {self.current_line_num()}: missing closing square bracket")
+                 self.eat(']')
+                 left = IndexAccess(left, index, line_num)
+            # --- END MODIFICATION ---
         return left
 
 # -----------------------------
@@ -735,6 +828,7 @@ def evaluate(ast, local_vars=None):
         Exception: If an unsupported AST node or runtime error is encountered.
         TypeError: If a type mismatch occurs during evaluation.
         ZeroDivisionError: If division by zero occurs.
+        IndexError: If an index is out of bounds for a list.
     """
     if local_vars is None:
         local_vars = {}
@@ -750,6 +844,9 @@ def evaluate(ast, local_vars=None):
                  raise Exception(f"Error: variable '{name}' is used before assignment")
              return symbol_table[name]
          else:
+             # --- MODIFICATION: Check if the variable was deleted ---
+             if name in deleted_variables:
+                 raise Exception(f"Error: access to deleted object") # Specific error for deleted objects
              # --- MODIFICATION: Automatically declare variable with default value (0) if not found ---
              # This is done to make the user's specific input work without requiring 'let'.
              # In a real language, this would typically be a "variable not defined" error.
@@ -781,6 +878,10 @@ def evaluate(ast, local_vars=None):
     elif isinstance(ast, NullLiteral):
         return ast.value # Returns Python's None
     # --- END MODIFICATION ---
+    # --- MODIFICATION: Handle ListLiteral evaluation ---
+    elif isinstance(ast, ListLiteral):
+        return [evaluate(element, local_vars) for element in ast.elements]
+    # --- END MODIFICATION ---
     elif isinstance(ast, Variable):
         return get_variable(ast.name, ast.line_num)
     elif isinstance(ast, Assignment):
@@ -793,18 +894,31 @@ def evaluate(ast, local_vars=None):
         if value is None:
              print("Memory cleared or collected") # Print the memory clear message
 
-        set_variable(ast.name, value, ast.line_num)
-        # Print the update message if it was an update (not the initial 'let' assignment)
-        # Note: This logic assumes that the first assignment after 'let' is not considered an "update" in the desired output sense.
-        # If 'let x = 5; x = 6;' should print "Variable x updated correctly" for the `x = 6;` part,
-        # this check works. If it should print for the `let x = 5;` part too, the logic needs adjustment.
-        # Based on the input `let x = 5; x = 6;` and output `Variable x updated correctly`, it seems the message
-        # is expected for the *second* assignment.
-        # Also, avoid printing "updated correctly" when assigning null, as the requested output doesn't show both.
-        if is_update and value is not None:
-             print(f"Variable {ast.name} updated correctly")
+        # --- MODIFICATION: Handle assignment to IndexAccess ---
+        if isinstance(ast.name, IndexAccess):
+             base_obj = evaluate(ast.name.base, local_vars)
+             index_val = evaluate(ast.name.index, local_vars)
+
+             if not isinstance(base_obj, list): # Check if the base is a list
+                  raise TypeError(f"Runtime error on line {ast.line_num}: Cannot assign to index of non-list type")
+             if not isinstance(index_val, int): # Check if the index is an integer
+                  raise TypeError(f"Runtime error on line {ast.line_num}: List index must be an integer")
+             if index_val < 0 or index_val >= len(base_obj): # Check if index is out of bounds
+                  raise IndexError(f"Runtime error on line {ast.line_num}: List index out of range")
+
+             base_obj[index_val] = value # Perform the assignment to the list element
+             # No specific update message for list element assignment in the requested output
+             return value
         # --- END MODIFICATION ---
-        return value
+        else: # Handle assignment to a Variable or MemberAccess (existing logic)
+             set_variable(ast.name, value, ast.line_num)
+             # Print the update message if it was an update (not the initial 'let' assignment)
+             # Also, avoid printing "updated correctly" when assigning null, as the requested output doesn't show both.
+             if is_update and value is not None:
+                  print(f"Variable {ast.name} updated correctly")
+             return value
+        # --- END MODIFICATION ---
+
     elif isinstance(ast, BinaryOp):
         left = evaluate(ast.left, local_vars)
         right = evaluate(ast.right, local_vars)
@@ -912,6 +1026,23 @@ def evaluate(ast, local_vars=None):
         if ast.member not in instance:
             raise Exception(f"Runtime error on line {ast.line_num}: Member '{ast.member}' not found in {instance}")
         return instance[ast.member]
+    # --- MODIFICATION: Handle Index Access Evaluation ---
+    elif isinstance(ast, IndexAccess):
+        """
+        Evaluates an index access (e.g., list[index]).
+        """
+        base_obj = evaluate(ast.base, local_vars)
+        index_val = evaluate(ast.index, local_vars)
+
+        if not isinstance(base_obj, list): # Check if the base is a list
+             raise TypeError(f"Runtime error on line {ast.line_num}: Cannot index non-list type")
+        if not isinstance(index_val, int): # Check if the index is an integer
+             raise TypeError(f"Runtime error on line {ast.line_num}: List index must be an integer")
+        if index_val < 0 or index_val >= len(base_obj): # Check if index is out of bounds
+             raise IndexError(f"Runtime error on line {ast.line_num}: List index out of range")
+
+        return base_obj[index_val] # Return the element at the specified index
+    # --- END MODIFICATION ---
     elif isinstance(ast, ForLoop):
         # -----------------------------
         # For Loop Evaluation (Enhanced Control Structures)
@@ -948,6 +1079,31 @@ def evaluate(ast, local_vars=None):
             result = evaluate(ast.body, local_vars) # Evaluate body in the current scope
         return result
     # --- End New Evaluation Logic ---
+    # --- New Evaluation Logic for Delete ---
+    elif isinstance(ast, DeleteCall):
+        """
+        Evaluates a delete call.
+        """
+        # Ensure the argument is a variable
+        if not isinstance(ast.name, Variable):
+             raise Exception(f"Runtime error on line {ast.line_num}: delete() expects a variable name")
+
+        var_name = ast.name.name
+        # Check if the variable exists before attempting to delete
+        if var_name not in symbol_table:
+             # If the variable is not in the symbol table, it's either not defined or already deleted.
+             # We'll check the deleted_variables set for a more specific error message if needed.
+             if var_name in deleted_variables:
+                  raise Exception(f"Runtime error on line {ast.line_num}: Variable '{var_name}' already deleted")
+             else:
+                  raise Exception(f"Runtime error on line {ast.line_num}: Undefined variable '{var_name}'")
+
+        # Remove the variable from the symbol table
+        del symbol_table[var_name]
+        # Add the variable name to a set of deleted variables for checking later access
+        deleted_variables.add(var_name)
+        return None # delete doesn't return a value
+    # --- End New Evaluation Logic ---
     elif isinstance(ast, ReturnStatement):
         # In a real interpreter, this would stop the function execution and return the value.
         # For this simple evaluator, we just return the value.
@@ -955,7 +1111,11 @@ def evaluate(ast, local_vars=None):
     elif isinstance(ast, StatementList):
         result = None
         for stmt in ast.statements:
-            result = evaluate(stmt, local_vars)
+            try:
+                result = evaluate(stmt, local_vars)
+            except ReturnValue as rv:
+                 # Propagate return values up the call stack
+                 raise rv
         return result
     elif isinstance(ast, FunctionDef) or isinstance(ast, StructDef):
         # Definitions do not produce a runtime value when encountered in a statement list.
@@ -968,8 +1128,21 @@ def evaluate(ast, local_vars=None):
          value = evaluate(ast.value, local_vars)
          instance[ast.name.member] = value
          return value
+    # Handle assignment to an index access (already handled above in Assignment evaluation)
+    # elif isinstance(ast, Assignment) and isinstance(ast.name, IndexAccess):
+    #      # This case is now handled within the general Assignment evaluation logic
+    #      pass
+
 
     raise Exception(f"Runtime error on line {ast.line_num}: Unsupported AST node {type(ast)}")
+
+# Set to keep track of deleted variable names
+deleted_variables = set()
+
+# Custom exception for handling return values
+class ReturnValue(Exception):
+    def __init__(self, value):
+        self.value = value
 
 # -----------------------------
 # Interactive Main Loop
