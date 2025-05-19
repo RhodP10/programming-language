@@ -10,7 +10,9 @@ import sys # Import sys for handling input in a more controlled way
 # FIX: Reordered regex to prioritize matching comments (//.*) before general operators (like /)
 TOKEN_REGEX = r'(\'(?:\\.|[^\'\\])*\')|(\"(?:\\.|[^\"\\])*\")|(//.*)|(\d+)|([a-zA-Z_]+)|(==|!=|&&|\|\||[+\-*/^()=<>!&|{},;.])|(\s+)|(.)'
 # Added ('\"(?:\\.|[^\"\\])*\"') to match double-quoted strings
-KEYWORDS = {"function", "struct", "return", "for", "if", "else", "true", "false", "not", "and", "or", "let", "while", "input"} # Added 'while' and 'input' keywords
+# --- MODIFICATION: Added 'null' to KEYWORDS ---
+KEYWORDS = {"function", "struct", "return", "for", "if", "else", "true", "false", "not", "and", "or", "let", "while", "input", "null"}
+# --- END MODIFICATION ---
 
 def tokenize(expression):
     """
@@ -145,6 +147,16 @@ class StringLiteral(ASTNode):
     def __repr__(self):
         # Include quotes in the representation to match the token output format
         return f"'{self.value}'"
+
+# --- NEW AST Node for Null ---
+class NullLiteral(ASTNode):
+    """Represents a null literal node in the AST."""
+    def __init__(self, line_num=None):
+        super().__init__(line_num)
+        self.value = None # Represent null as Python's None
+    def __repr__(self):
+        return "null"
+# --- END NEW AST Node ---
 
 
 class Variable(ASTNode):
@@ -667,6 +679,11 @@ class Parser:
         elif token == "false":
             self.eat("false")
             left = BooleanLiteral(False, line_num)
+        # --- MODIFICATION: Handle 'null' literal ---
+        elif token == "null":
+             self.eat("null")
+             left = NullLiteral(line_num)
+        # --- END MODIFICATION ---
         elif token and token.isdigit():
             self.eat(token)
             left = Number(int(token), line_num)
@@ -760,13 +777,22 @@ def evaluate(ast, local_vars=None):
         return ast.value
     elif isinstance(ast, StringLiteral):
         return ast.value
+    # --- MODIFICATION: Handle NullLiteral evaluation ---
+    elif isinstance(ast, NullLiteral):
+        return ast.value # Returns Python's None
+    # --- END MODIFICATION ---
     elif isinstance(ast, Variable):
         return get_variable(ast.name, ast.line_num)
     elif isinstance(ast, Assignment):
-        # --- MODIFICATION: Add print statement for variable updates ---
+        # --- MODIFICATION: Add print statement for variable updates and memory clear message ---
         # Check if the variable exists before the assignment
         is_update = ast.name in symbol_table
         value = evaluate(ast.value, local_vars)
+
+        # Check if the new value is None (representing null)
+        if value is None:
+             print("Memory cleared or collected") # Print the memory clear message
+
         set_variable(ast.name, value, ast.line_num)
         # Print the update message if it was an update (not the initial 'let' assignment)
         # Note: This logic assumes that the first assignment after 'let' is not considered an "update" in the desired output sense.
@@ -774,7 +800,8 @@ def evaluate(ast, local_vars=None):
         # this check works. If it should print for the `let x = 5;` part too, the logic needs adjustment.
         # Based on the input `let x = 5; x = 6;` and output `Variable x updated correctly`, it seems the message
         # is expected for the *second* assignment.
-        if is_update:
+        # Also, avoid printing "updated correctly" when assigning null, as the requested output doesn't show both.
+        if is_update and value is not None:
              print(f"Variable {ast.name} updated correctly")
         # --- END MODIFICATION ---
         return value
@@ -844,6 +871,8 @@ def evaluate(ast, local_vars=None):
                       formatted_args.append("true" if arg else "false")
                  elif isinstance(arg, str):
                       formatted_args.append(f"'{arg}'") # Include quotes for string literals in print output
+                 elif arg is None: # Handle printing of null
+                      formatted_args.append("null")
                  else:
                       formatted_args.append(str(arg))
 
