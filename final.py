@@ -1157,7 +1157,15 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         print(f"sys.argv[1]: {sys.argv[1]}")
 
-    if len(sys.argv) > 1 and sys.argv[1] == "run":
+    # --- MODIFICATION: Check for --help anywhere in arguments ---
+    if "--help" in sys.argv:
+         # Basic help message (matches rubric example 7.4)
+         print("Usage: python final.py [run <filename>] [--help]")
+         print("  run <filename>  : Executes the code in the specified file.")
+         print("  --help          : Displays this help message.")
+         print("If no arguments are provided, enters interactive REPL mode.")
+    # --- END MODIFICATION ---
+    elif len(sys.argv) > 1 and sys.argv[1] == "run":
         print("Detected 'run' command.")
         if len(sys.argv) > 2:
             file_name = sys.argv[2]
@@ -1256,13 +1264,6 @@ if __name__ == "__main__":
                 print(f"Error: File '{file_name}' not found.", file=sys.stderr)
         else:
             print("Usage: python final.py run <filename>", file=sys.stderr) # Updated usage message
-    elif len(sys.argv) > 1 and sys.argv[1] == "--help":
-         # Basic help message (matches rubric example 7.4)
-         print("Usage: python final.py [run <filename>] [--help]")
-         print("  run <filename>  : Executes the code in the specified file.")
-         print("  --help          : Displays this help message.")
-         print("If no arguments are provided, enters interactive REPL mode.")
-         # Removed the 'tokens' command instruction from help
     elif len(sys.argv) > 1:
          print(f"Unknown command: {sys.argv[1]}. Use --help for usage.", file=sys.stderr)
     else:
