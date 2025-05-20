@@ -927,8 +927,9 @@ def evaluate(ast, local_vars=None):
         if ast.op in ('+', '-', '*', '/', '^', '>', '<'):
             # Arithmetic and comparison operators require numbers
             if not isinstance(left, (int, float)) or not isinstance(right, (int, float)):
-                # Exact error message from rubric for type mismatch
-                raise TypeError(f"Error: cannot add string and number") # Using the specific message for string+number as per rubric example
+                # --- MODIFICATION: Include line number in TypeError message ---
+                raise TypeError(f"Error on line {ast.line_num}: cannot add string and number") # Using the specific message for string+number as per rubric example
+                # --- END MODIFICATION ---
             if ast.op == '+': return left + right
             elif ast.op == '-': return left - right
             elif ast.op == '*': return left * right
@@ -1209,6 +1210,11 @@ if __name__ == "__main__":
                                 else:
                                      # Print a newline for clarity even if no explicit result is printed
                                      print("\n", end="")
+                            # --- MODIFICATION: Catch TypeError specifically ---
+                            except TypeError as e:
+                                print(f"{e}", file=sys.stderr) # Print exact error message without "Error -"
+                                break # Stop processing after a runtime error
+                            # --- END MODIFICATION ---
                             # --- MODIFICATION: Catch ZeroDivisionError specifically ---
                             except ZeroDivisionError as e:
                                 print(f"{e}", file=sys.stderr) # Print exact error message without "Error -"
@@ -1231,6 +1237,10 @@ if __name__ == "__main__":
                                  print(f"Evaluation: {result_str}\n")
                              else:
                                  print("\n", end="")
+                         # --- MODIFICATION: Catch TypeError specifically ---
+                         except TypeError as e:
+                              print(f"{e}", file=sys.stderr) # Print exact error message without "Error -"
+                         # --- END MODIFICATION ---
                          # --- MODIFICATION: Catch ZeroDivisionError specifically ---
                          except ZeroDivisionError as e:
                               print(f"{e}", file=sys.stderr) # Print exact error message without "Error -"
@@ -1340,6 +1350,10 @@ if __name__ == "__main__":
                              # Print a newline for clarity even if no explicit result is printed
                              print("\n", end="")
 
+                    # --- MODIFICATION: Catch TypeError specifically in REPL ---
+                    except TypeError as e:
+                         print(f"{e}\n", file=sys.stderr) # Print exact error message with newline
+                    # --- END MODIFICATION ---
                     # --- MODIFICATION: Catch ZeroDivisionError specifically in REPL ---
                     except ZeroDivisionError as e:
                          print(f"{e}\n", file=sys.stderr) # Print exact error message with newline
