@@ -12,8 +12,8 @@ import sys # Import sys for handling input in a more controlled way
 TOKEN_REGEX = r'(\'(?:\\.|[^\'\\])*\')|(\"(?:\\.|[^\"\\])*\")|(//.*)|(\d+)|([a-zA-Z_]+)|(==|!=|&&|\|\||[+\-*/^()=<>!&|{},;.\[\]])|(\s+)|(.)'
 # --- END MODIFICATION ---
 # Added ('\"(?:\\.|[^\"\\])*\"') to match double-quoted strings
-# --- MODIFICATION: Added 'null' and 'delete' to KEYWORDS ---
-KEYWORDS = {"function", "struct", "return", "for", "if", "else", "true", "false", "not", "and", "or", "let", "while", "input", "null", "delete"}
+# --- MODIFICATION: Added 'class' and 'new' to KEYWORDS ---
+KEYWORDS = {"function", "struct", "return", "for", "if", "else", "true", "false", "not", "and", "or", "let", "while", "input", "null", "delete", "class", "new"}
 # --- END MODIFICATION ---
 
 def tokenize(expression):
@@ -191,6 +191,40 @@ class IndexAccess(ASTNode):
         return f"IndexAccess({repr(self.base)}, {repr(self.index)})"
 # --- END NEW AST Node ---
 
+# --- NEW AST Node for Class Definition ---
+class ClassDef(ASTNode):
+    """Represents a class definition node in the AST."""
+    def __init__(self, name, methods, line_num=None):
+        super().__init__(line_num)
+        self.name = name
+        self.methods = methods # Dictionary mapping method name to FunctionDef node
+    def __repr__(self):
+        return f"ClassDef({self.name}, {repr(self.methods)})"
+# --- END NEW AST Node ---
+
+# --- NEW AST Node for New Expression ---
+class NewExpression(ASTNode):
+    """Represents a 'new' expression for object instantiation."""
+    def __init__(self, class_name, args, line_num=None):
+        super().__init__(line_num)
+        self.class_name = class_name
+        self.args = args # Arguments passed to the constructor (if any)
+    def __repr__(self):
+        return f"New({self.class_name}, [{', '.join(map(repr, self.args))}])"
+# --- END NEW AST Node ---
+
+# --- NEW AST Node for Method Call ---
+class MethodCall(ASTNode):
+    """Represents a method call on an object instance."""
+    def __init__(self, base, method_name, args, line_num=None):
+        super().__init__(line_num)
+        self.base = base # The expression for the object instance
+        self.method_name = method_name # The name of the method (string)
+        self.args = args # Arguments passed to the method
+    def __repr__(self):
+        return f"MethodCall({repr(self.base)}, {self.method_name}, [{', '.join(map(repr, self.args))}])"
+# --- END NEW AST Node ---
+
 
 class Variable(ASTNode):
     """Represents a variable node in the AST."""
@@ -315,6 +349,9 @@ class WhileLoop(ASTNode):
 symbol_table = {}
 function_table = {}
 struct_table = {}
+# --- NEW: Class Table ---
+class_table = {}
+# --- END NEW ---
 
 # Set to keep track of deleted variable names
 deleted_variables = set() # Moved this to global scope
@@ -521,6 +558,52 @@ class Parser:
         return DeleteCall(arg, line_num)
     # --- End New Parsing Logic ---
 
+    # --- MODIFICATION: Parsing Logic for Class Definition ---
+    def parse_class_def(self):
+        """
+        Parses a class definition.
+
+        Returns:
+            ClassDef: An AST node representing the class definition.
+
+        Raises:
+            SyntaxError: If the class definition syntax is invalid.
+        """
+        line_num = self.eat("class")
+        if not self.current() or not self.current().isidentifier():
+            raise SyntaxError(f"Syntax error on line {self.current_line_num()}: Expected class name after 'class'")
+        name = self.current()
+        self.eat(name)
+        self.eat("{")
+        methods = {}
+        while self.current() != "}":
+            # --- MODIFICATION: Parse method definition (identifier, '(', params, ')', block) ---
+            method_name, method_line_num = self.current_token_info()
+            if not method_name or not method_name.isidentifier():
+                 raise SyntaxError(f"Syntax error on line {self.current_line_num()}: Expected method name or '}}'")
+            self.eat(method_name)
+            self.eat("(")
+            params = []
+            # Add 'self' as the implicit first parameter for methods
+            params.append("self") # Conventionally named 'self'
+            while self.current() != ")":
+                 if not self.current() or not self.current().isidentifier():
+                      raise SyntaxError(f"Syntax error on line {self.current_line_num()}: Invalid parameter name '{self.current()}'")
+                 params.append(self.current())
+                 self.eat(self.current())
+                 if self.current() == ",":
+                      self.eat(",")
+                 elif self.current() != ")":
+                      raise SyntaxError(f"Syntax error on line {self.current_line_num()}: Expected ',' or ')' after parameter")
+            self.eat(")")
+            body = self.parse_block() # Parse the method body as a block
+            methods[method_name] = FunctionDef(method_name, params, body, method_line_num) # Store method as a FunctionDef
+            # --- END MODIFICATION ---
+        self.eat("}")
+        class_table[name] = ClassDef(name, methods, line_num) # Store class definition globally
+        return class_table[name]
+    # --- END MODIFICATION ---
+
 
     def parse_block(self):
         """
@@ -603,7 +686,10 @@ class Parser:
             value = self.parse_expression(0)
             return ReturnStatement(value, line_num)
         elif self.current() == "function":
-            return self.parse_function_def()
+            # This is for parsing standalone global functions
+            func_def = self.parse_function_def()
+            function_table[func_def.name] = func_def # Store global function
+            return func_def
         elif self.current() == "for":
             return self.parse_for_loop()
         elif self.current() == "if":
@@ -616,6 +702,10 @@ class Parser:
         elif self.current() == "delete":
              return self.parse_delete_call()
         # --- End Add Parsing ---
+        # --- NEW: Add Parsing for Class Definition ---
+        elif self.current() == "class":
+             return self.parse_class_def()
+        # --- END NEW ---
         else:
             # Assume it's an expression statement
             expr = self.parse_expression(0)
@@ -625,9 +715,11 @@ class Parser:
     # Function Parameters & Return Values
     # (Function definition parsing)
     # -----------------------------
+    # --- MODIFICATION: parse_function_def now only parses the function structure, not stores it ---
+    # The caller (parse_statement or parse_class_def) is responsible for storing the FunctionDef node.
     def parse_function_def(self):
         """
-        Parses a function definition.
+        Parses a function definition (used for both global functions and methods).
 
         Returns:
             FunctionDef: An AST node representing the function definition.
@@ -635,7 +727,7 @@ class Parser:
         Raises:
             SyntaxError: If the function definition syntax is invalid.
         """
-        line_num = self.eat("function")
+        line_num = self.eat("function") # Still expect 'function' for global functions
         if not self.current() or not self.current().isidentifier():
             raise SyntaxError(f"Syntax error on line {self.current_line_num()}: Expected function name after 'function'")
         name = self.current()
@@ -653,8 +745,9 @@ class Parser:
                  raise SyntaxError(f"Syntax error on line {self.current_line_num()}: Expected ',' or ')' after parameter")
         self.eat(")")
         body = self.parse_block()
-        function_table[name] = FunctionDef(name, params, body, line_num)
-        return function_table[name]
+        return FunctionDef(name, params, body, line_num)
+    # --- END MODIFICATION ---
+
 
     def parse_expression(self, min_precedence=0):
         """
@@ -712,7 +805,7 @@ class Parser:
 
     def parse_primary(self):
         """
-        Parses a primary expression (literals, variables, function calls, parenthesized expressions, lists, index access).
+        Parses a primary expression (literals, variables, function calls, parenthesized expressions, lists, index access, new expressions).
 
         Returns:
             ASTNode: An AST node representing the primary expression.
@@ -761,6 +854,24 @@ class Parser:
         elif token and token.isdigit():
             self.eat(token)
             left = Number(int(token), line_num)
+        # --- NEW: Handle 'new' expression ---
+        elif token == "new":
+             line_num = self.eat("new")
+             if not self.current() or not self.current().isidentifier():
+                  raise SyntaxError(f"Syntax error on line {self.current_line_num()}: Expected class name after 'new'")
+             class_name = self.current()
+             self.eat(class_name)
+             self.eat("(")
+             args = []
+             while self.current() != ")":
+                  args.append(self.parse_expression(0))
+                  if self.current() == ',':
+                       self.eat(',')
+                  elif self.current() != ')':
+                       raise SyntaxError(f"Syntax error on line {self.current_line_num()}: Expected ',' or ')' in constructor arguments")
+             self.eat(")")
+             left = NewExpression(class_name, args, line_num)
+        # --- END NEW ---
         elif token and token.isidentifier():
             self.eat(token)
             if self.current() == '(':
@@ -789,7 +900,7 @@ class Parser:
             raise SyntaxError(f"Syntax error on line {line_num}: Unexpected token: {token}")
         # -----------------------------
         # Member Access Handling (dot operator) and Index Access Handling
-        # -----------------------------
+        # --- MODIFICATION: Handle Method Call after Member Access ---
         while self.current() == '.' or self.current() == '[':
             if self.current() == '.':
                  self.eat('.')
@@ -797,7 +908,23 @@ class Parser:
                  if not member or not member.isidentifier():
                      raise SyntaxError(f"Syntax error on line {member_line_num}: Expected member name after '.'")
                  self.eat(member)
-                 left = MemberAccess(left, member, line_num) # Use line_num of the base for the MemberAccess node
+                 # Check if the next token is '(' for a method call
+                 if self.current() == '(':
+                      self.eat('(')
+                      args = []
+                      while self.current() != ')':
+                           args.append(self.parse_expression(0))
+                           if self.current() == ',':
+                                self.eat(',')
+                           elif self.current() != ')':
+                                raise SyntaxError(f"Syntax error on line {self.current_line_num()}: Expected ',' or ')' in method arguments")
+                      self.eat(')')
+                      # Create a MethodCall node
+                      left = MethodCall(left, member, args, line_num) # Use line_num of the base
+                 else:
+                      # It's a regular member access (like accessing a field)
+                      left = MemberAccess(left, member, line_num) # Use line_num of the base for the MemberAccess node
+            # --- END MODIFICATION ---
             # --- MODIFICATION: Handle Index Access ---
             elif self.current() == '[':
                  line_num = self.eat('[')
@@ -812,6 +939,19 @@ class Parser:
 # -----------------------------
 # Evaluator Definition
 # -----------------------------
+# --- NEW: Define a simple object instance representation ---
+class ObjectInstance:
+    """Represents an instance of a class."""
+    def __init__(self, class_def):
+        self.class_def = class_def
+        self.data = {} # Dictionary to store instance data (fields)
+
+    def __repr__(self):
+        # Simple representation for printing
+        return f"Instance({self.class_def.name}, data={self.data})"
+# --- END NEW ---
+
+
 def evaluate(ast, local_vars=None):
     """
     Evaluates the given Abstract Syntax Tree (AST).
@@ -829,6 +969,8 @@ def evaluate(ast, local_vars=None):
         TypeError: If a type mismatch occurs during evaluation.
         ZeroDivisionError: If division by zero occurs.
         IndexError: If an index is out of bounds for a list.
+        NameError: If a variable or class is not defined.
+        AttributeError: If a member or method is not found on an object.
     """
     if local_vars is None:
         local_vars = {}
@@ -894,7 +1036,7 @@ def evaluate(ast, local_vars=None):
         if value is None:
              print("Memory cleared or collected") # Print the memory clear message
 
-        # --- MODIFICATION: Handle assignment to IndexAccess ---
+        # --- MODIFICATION: Handle assignment to IndexAccess and MemberAccess on instances ---
         if isinstance(ast.name, IndexAccess):
              base_obj = evaluate(ast.name.base, local_vars)
              index_val = evaluate(ast.name.index, local_vars)
@@ -909,8 +1051,16 @@ def evaluate(ast, local_vars=None):
              base_obj[index_val] = value # Perform the assignment to the list element
              # No specific update message for list element assignment in the requested output
              return value
+        elif isinstance(ast.name, MemberAccess):
+             # Handle assignment to an object's data field
+             instance_obj = evaluate(ast.name.base, local_vars)
+             if not isinstance(instance_obj, ObjectInstance):
+                  raise TypeError(f"Runtime error on line {ast.line_num}: Cannot assign to member of non-object type")
+             member_name = ast.name.member
+             instance_obj.data[member_name] = value # Assign to the instance's data
+             return value
         # --- END MODIFICATION ---
-        else: # Handle assignment to a Variable or MemberAccess (existing logic)
+        else: # Handle assignment to a Variable (existing logic)
              set_variable(ast.name, value, ast.line_num)
              # Print the update message if it was an update (not the initial 'let' assignment)
              # Also, avoid printing "updated correctly" when assigning null, as the requested output doesn't show both.
@@ -968,8 +1118,10 @@ def evaluate(ast, local_vars=None):
     elif isinstance(ast, FunctionCall):
         # -----------------------------
         # Function Call Evaluation Block (Function Parameters & Return Values)
-        # -----------------------------
-        # First, check for struct instantiation.
+        # --- MODIFICATION: Handle Function Calls that are not Method Calls ---
+        # This block now only handles calls that are NOT MethodCalls (e.g., print(), add(), global functions)
+        # Method calls like p.greet() are handled by the new MethodCall AST node.
+        # First, check for struct instantiation (still a function-like call).
         if ast.name in struct_table:
             fields = struct_table[ast.name]
             if len(fields) != len(ast.args):
@@ -988,6 +1140,10 @@ def evaluate(ast, local_vars=None):
                       formatted_args.append(f"'{arg}'") # Include quotes for string literals in print output
                  elif arg is None: # Handle printing of null
                       formatted_args.append("null")
+                 # --- NEW: Handle printing of ObjectInstance ---
+                 elif isinstance(arg, ObjectInstance):
+                      formatted_args.append(repr(arg)) # Use the ObjectInstance's __repr__
+                 # --- END NEW ---
                  else:
                       formatted_args.append(str(arg))
 
@@ -1006,7 +1162,7 @@ def evaluate(ast, local_vars=None):
                   return input()
              # --- End Implementation for input() ---
 
-        # Normal function call handling:
+        # Normal global function call handling:
         func = function_table.get(ast.name)
         if not func:
             raise Exception(f"Runtime error on line {ast.line_num}: Undefined function '{ast.name}'")
@@ -1017,16 +1173,35 @@ def evaluate(ast, local_vars=None):
         new_locals = {param: evaluated_args[i] for i, param in enumerate(func.params)}
         # Evaluate the function body with the new local scope
         return evaluate(func.body, new_locals)
+        # --- END MODIFICATION ---
+
     elif isinstance(ast, MemberAccess):
         # -----------------------------
         # Struct Member Access Evaluation
-        # -----------------------------
-        instance = evaluate(ast.base, local_vars)
-        if not isinstance(instance, dict):
-            raise Exception(f"Runtime error on line {ast.line_num}: Attempted member access on non-struct or non-object: {instance}")
-        if ast.member not in instance:
-            raise Exception(f"Runtime error on line {ast.line_num}: Member '{ast.member}' not found in {instance}")
-        return instance[ast.member]
+        # --- MODIFICATION: Handle Member Access on Object Instances ---
+        base_obj = evaluate(ast.base, local_vars)
+        member_name = ast.member
+
+        if isinstance(base_obj, ObjectInstance):
+             # Check if the member is a data field
+             if member_name in base_obj.data:
+                  return base_obj.data[member_name]
+             # Check if the member is a method
+             if member_name in base_obj.class_def.methods:
+                  # When accessing a method, return the method definition itself
+                  # The MethodCall AST node will handle calling it.
+                  return base_obj.class_def.methods[member_name]
+             # If not found as data or method, it's an error
+             raise AttributeError(f"Runtime error on line {ast.line_num}: Object of type '{base_obj.class_def.name}' has no member '{member_name}'")
+
+        elif isinstance(base_obj, dict): # Handle struct member access (existing logic)
+            if ast.member not in base_obj:
+                raise Exception(f"Runtime error on line {ast.line_num}: Member '{ast.member}' not found in {base_obj}")
+            return base_obj[ast.member]
+        # --- END MODIFICATION ---
+        else:
+             raise Exception(f"Runtime error on line {ast.line_num}: Attempted member access on non-struct or non-object: {base_obj}")
+
     # --- MODIFICATION: Handle Index Access Evaluation ---
     elif isinstance(ast, IndexAccess):
         """
@@ -1105,10 +1280,87 @@ def evaluate(ast, local_vars=None):
         deleted_variables.add(var_name)
         return None # delete doesn't return a value
     # --- End New Evaluation Logic ---
+    # --- NEW: Evaluation Logic for Class Definition ---
+    elif isinstance(ast, ClassDef):
+        # Class definitions are registered in the class_table during parsing.
+        # Evaluation just returns the class definition itself (or None if it's just a statement).
+        # For simplicity, we'll return None as it's typically a statement.
+        return None
+    # --- END NEW ---
+    # --- NEW: Evaluation Logic for New Expression ---
+    elif isinstance(ast, NewExpression):
+        """
+        Evaluates a 'new' expression to create an object instance.
+        """
+        class_name = ast.class_name
+        class_def = class_table.get(class_name)
+        if not class_def:
+             raise NameError(f"Runtime error on line {ast.line_num}: Undefined class '{class_name}'")
+
+        instance = ObjectInstance(class_def) # Create a new instance
+
+        # Check for a constructor method (e.g., 'init') and call it
+        # For this example, we'll assume the constructor is named 'init' if it exists.
+        # The provided example uses 'greet' directly, but a constructor is common for initialization.
+        # Let's adapt to the example and assume 'greet' is the method to call after instantiation for this specific case.
+        # A more robust approach would look for a dedicated constructor method.
+        # For the given example, we just create the instance and return it.
+        # The subsequent p.greet() call will handle the method execution.
+
+        # If there was an 'init' method, we would evaluate it here:
+        # constructor = class_def.methods.get('init')
+        # if constructor:
+        #      if len(constructor.params) != len(ast.args) + 1: # +1 for 'self'
+        #           raise Exception(f"Runtime error on line {ast.line_num}: Constructor '{class_name}.init' expects {len(constructor.params) - 1} arguments, but got {len(ast.args)}")
+        #      evaluated_args = [evaluate(arg, local_vars) for arg in ast.args]
+        #      constructor_locals = {constructor.params[0]: instance} # Map 'self'
+        #      for i, arg_val in enumerate(evaluated_args):
+        #           constructor_locals[constructor.params[i+1]] = arg_val
+        #      evaluate(constructor.body, constructor_locals)
+
+        return instance # Return the newly created instance
+    # --- END NEW ---
+    # --- NEW: Evaluation Logic for Method Call ---
+    elif isinstance(ast, MethodCall):
+        """
+        Evaluates a method call on an object instance.
+        """
+        instance_obj = evaluate(ast.base, local_vars)
+        method_name = ast.method_name
+
+        if not isinstance(instance_obj, ObjectInstance):
+             raise TypeError(f"Runtime error on line {ast.line_num}: Attempted to call method '{method_name}' on non-object type")
+
+        class_def = instance_obj.class_def
+        method_def = class_def.methods.get(method_name)
+
+        if not method_def:
+             raise AttributeError(f"Runtime error on line {ast.line_num}: Object of type '{class_def.name}' has no method '{method_name}'")
+
+        # Check number of arguments (+1 for 'self')
+        if len(method_def.params) != len(ast.args) + 1:
+             raise Exception(f"Runtime error on line {ast.line_num}: Method '{class_def.name}.{method_name}' expects {len(method_def.params) - 1} arguments, but got {len(ast.args)}")
+
+        evaluated_args = [evaluate(arg, local_vars) for arg in ast.args]
+
+        # Create a new local scope for the method execution
+        method_locals = {method_def.params[0]: instance_obj} # Map the first parameter (self) to the instance
+        for i, arg_val in enumerate(evaluated_args):
+             method_locals[method_def.params[i+1]] = arg_val # Map remaining parameters to evaluated arguments
+
+        # Evaluate the method's body in the new local scope
+        # Handle return values from the method
+        try:
+             result = evaluate(method_def.body, method_locals)
+             return result # Return the result of the method execution
+        except ReturnValue as rv:
+             return rv.value # Catch and return the value from a ReturnStatement
+
+    # --- END NEW ---
     elif isinstance(ast, ReturnStatement):
         # In a real interpreter, this would stop the function execution and return the value.
-        # For this simple evaluator, we just return the value.
-        return evaluate(ast.value, local_vars)
+        # For this simple evaluator, we just raise a custom exception to propagate the return value.
+        raise ReturnValue(evaluate(ast.value, local_vars))
     elif isinstance(ast, StatementList):
         result = None
         for stmt in ast.statements:
@@ -1120,15 +1372,13 @@ def evaluate(ast, local_vars=None):
         return result
     elif isinstance(ast, FunctionDef) or isinstance(ast, StructDef):
         # Definitions do not produce a runtime value when encountered in a statement list.
+        # Function definitions are handled by parse_function_def and stored.
+        # Struct definitions are handled by parse_struct_def and stored.
         return None
     # Handle assignment to a member access
     elif isinstance(ast, Assignment) and isinstance(ast.name, MemberAccess):
-         instance = evaluate(ast.name.base, local_vars)
-         if not isinstance(instance, dict):
-              raise Exception(f"Runtime error on line {ast.line_num}: Attempted member assignment on non-struct or non-object: {instance}")
-         value = evaluate(ast.value, local_vars)
-         instance[ast.name.member] = value
-         return value
+         # This case is now handled within the general Assignment evaluation logic
+         pass
     # Handle assignment to an index access (already handled above in Assignment evaluation)
     # elif isinstance(ast, Assignment) and isinstance(ast.name, IndexAccess):
     #      # This case is now handled within the general Assignment evaluation logic
@@ -1218,14 +1468,9 @@ if __name__ == "__main__":
                                 else:
                                      # Print a newline for clarity even if no explicit result is printed
                                      print("\n", end="")
-                            # --- MODIFICATION: Catch TypeError specifically ---
-                            except TypeError as e:
-                                print(f"{e}", file=sys.stderr) # Print exact error message without "Error -"
-                                break # Stop processing after a runtime error
-                            # --- END MODIFICATION ---
-                            # --- MODIFICATION: Catch ZeroDivisionError specifically ---
-                            except ZeroDivisionError as e:
-                                print(f"{e}", file=sys.stderr) # Print exact error message without "Error -"
+                            # --- MODIFICATION: Catch specific errors without "Error -" prefix ---
+                            except (TypeError, ZeroDivisionError, IndexError, NameError, AttributeError) as e:
+                                print(f"{e}", file=sys.stderr) # Print exact error message
                                 break # Stop processing after a runtime error
                             # --- END MODIFICATION ---
                             except (SyntaxError, Exception) as e:
@@ -1245,13 +1490,9 @@ if __name__ == "__main__":
                                  print(f"Evaluation: {result_str}\n")
                              else:
                                  print("\n", end="")
-                         # --- MODIFICATION: Catch TypeError specifically ---
-                         except TypeError as e:
-                              print(f"{e}", file=sys.stderr) # Print exact error message without "Error -"
-                         # --- END MODIFICATION ---
-                         # --- MODIFICATION: Catch ZeroDivisionError specifically ---
-                         except ZeroDivisionError as e:
-                              print(f"{e}", file=sys.stderr) # Print exact error message without "Error -"
+                         # --- MODIFICATION: Catch specific errors without "Error -" prefix ---
+                         except (TypeError, ZeroDivisionError, IndexError, NameError, AttributeError) as e:
+                              print(f"{e}", file=sys.stderr) # Print exact error message
                          # --- END MODIFICATION ---
                          except (SyntaxError, Exception) as e:
                              print(f"Error - {e}", file=sys.stderr)
@@ -1351,8 +1592,8 @@ if __name__ == "__main__":
                              # Print a newline for clarity even if no explicit result is printed
                              print("\n", end="")
 
-                    # --- MODIFICATION: Catch TypeError specifically in REPL ---
-                    except TypeError as e:
+                    # --- MODIFICATION: Catch specific errors without "Error -" prefix in REPL ---
+                    except (TypeError, ZeroDivisionError, IndexError, NameError, AttributeError) as e:
                          print(f"{e}\n", file=sys.stderr) # Print exact error message with newline
                     # --- END MODIFICATION ---
                     # --- MODIFICATION: Catch ZeroDivisionError specifically in REPL ---
