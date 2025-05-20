@@ -8,8 +8,8 @@ import sys # Import sys for handling input in a more controlled way
 # dot operator, tracks line numbers, explicitly handles comments and whitespace,
 # and improves invalid token detection.
 # FIX: Reordered regex to prioritize matching comments (//.*) before general operators (like /)
-# --- MODIFICATION: Added '[' and ']' to the operator group ---
-TOKEN_REGEX = r'(\'(?:\\.|[^\'\\])*\')|(\"(?:\\.|[^\"\\])*\")|(//.*)|(\d+)|([a-zA-Z_]+)|(==|!=|&&|\|\||[+\-*/^()=<>!&|{},;.\[\]])|(\s+)|(.)'
+# --- MODIFICATION: Added '[' and ']', and '=>' to the operator group ---
+TOKEN_REGEX = r'(\'(?:\\.|[^\'\\])*\')|(\"(?:\\.|[^\"\\])*\")|(//.*)|(\d+)|([a-zA-Z_]+)|(==|!=|&&|\|\||[+\-*/^()=<>!&|{},;.\[\]]|=>)|(\s+)|(.)'
 # --- END MODIFICATION ---
 # Added ('\"(?:\\.|[^\"\\])*\"') to match double-quoted strings
 # --- MODIFICATION: Added 'class' and 'new' to KEYWORDS ---
@@ -223,6 +223,18 @@ class MethodCall(ASTNode):
         self.args = args # Arguments passed to the method
     def __repr__(self):
         return f"MethodCall({repr(self.base)}, {self.method_name}, [{', '.join(map(repr, self.args))}])"
+# --- END NEW AST Node ---
+
+# --- NEW AST Node for Anonymous Function ---
+class AnonymousFunction(ASTNode):
+    """Represents an anonymous function (lambda or arrow function)."""
+    def __init__(self, params, body, line_num=None):
+        super().__init__(line_num)
+        self.params = params
+        self.body = body # Can be an expression or a StatementList (block)
+    def __repr__(self):
+        # Represent parameters and body
+        return f"AnonymousFunction([{', '.join(self.params)}], {repr(self.body)})"
 # --- END NEW AST Node ---
 
 
@@ -748,6 +760,42 @@ class Parser:
         return FunctionDef(name, params, body, line_num)
     # --- END MODIFICATION ---
 
+    # --- NEW: Parsing Logic for Anonymous Function ---
+    def parse_anonymous_function(self):
+        """
+        Parses an anonymous function (arrow function).
+
+        Returns:
+            AnonymousFunction: An AST node representing the anonymous function.
+
+        Raises:
+            SyntaxError: If the anonymous function syntax is invalid.
+        """
+        line_num = self.current_line_num() # Get line number at the start of parsing
+        # Assumes '(' has already been consumed by the caller (parse_primary)
+        params = []
+        while self.current() != ")":
+            if not self.current() or not self.current().isidentifier():
+                 raise SyntaxError(f"Syntax error on line {self.current_line_num()}: Invalid parameter name '{self.current()}' in anonymous function")
+            params.append(self.current())
+            self.eat(self.current())
+            if self.current() == ",":
+                 self.eat(",")
+            elif self.current() != ")":
+                 raise SyntaxError(f"Syntax error on line {self.current_line_num()}: Expected ',' or ')' after parameter in anonymous function")
+        self.eat(")")
+        # --- MODIFICATION: Check for '=' and '>' separately for '=>' ---
+        self.eat("=")
+        self.eat(">")
+        # --- END MODIFICATION ---
+        # The body can be a single expression or a block
+        if self.current() == "{":
+             body = self.parse_block()
+        else:
+             body = self.parse_expression(0) # Parse as a single expression
+        return AnonymousFunction(params, body, line_num)
+    # --- END NEW ---
+
 
     def parse_expression(self, min_precedence=0):
         """
@@ -805,7 +853,7 @@ class Parser:
 
     def parse_primary(self):
         """
-        Parses a primary expression (literals, variables, function calls, parenthesized expressions, lists, index access, new expressions).
+        Parses a primary expression (literals, variables, function calls, parenthesized expressions, lists, index access, new expressions, anonymous functions).
 
         Returns:
             ASTNode: An AST node representing the primary expression.
@@ -815,12 +863,59 @@ class Parser:
         """
         token, line_num = self.current_token_info()
         if token == '(':
-            self.eat('(')
-            expr = self.parse_expression(0)
-            if self.current() != ')':
-                raise SyntaxError(f"Syntax error on line {self.current_line_num()}: missing closing parenthesis")
-            self.eat(')')
-            left = expr
+            original_pos = self.pos
+            original_line = self.current_line_num()
+            try:
+                # --- MODIFICATION: Attempt to parse as an anonymous function first ---
+                # Check if the pattern is (params) => ... by looking ahead
+                # Check if the token after '(' is ')' or an identifier
+                if (self.pos + 1 < len(self.tokens) and self.tokens[self.pos + 1][0] == ')') or \
+                   (self.pos + 1 < len(self.tokens) and self.tokens[self.pos + 1][0].isidentifier()):
+
+                     # Tentatively parse parameters to find the closing ')'
+                     temp_pos = self.pos + 1 # Start after the initial '('
+                     while temp_pos < len(self.tokens) and self.tokens[temp_pos][0] != ")":
+                          if not self.tokens[temp_pos][0].isidentifier() and self.tokens[temp_pos][0] != ',':
+                               # Not a valid parameter list format for anonymous function
+                               raise SyntaxError("Not anonymous function params") # Use a distinct error for internal check
+                          temp_pos += 1
+
+                     if temp_pos < len(self.tokens) and self.tokens[temp_pos][0] == ")":
+                          # Found the closing ')'. Now check if the next tokens are '=' and '>'.
+                          if temp_pos + 2 < len(self.tokens) and self.tokens[temp_pos + 1][0] == '=' and self.tokens[temp_pos + 2][0] == '>':
+                               # It's an anonymous function! Consume the initial '(' and parse it.
+                               self.eat('(') # Consume the initial '('
+                               return self.parse_anonymous_function()
+                          else:
+                               # Found ')', but not followed by '=>'. Rewind and parse as regular parenthesized expression.
+                               self.pos = original_pos # Rewind to before the initial '('
+
+                     else:
+                          # Didn't find a closing ')' after the potential parameters. Rewind.
+                          self.pos = original_pos # Rewind to before the initial '('
+
+                else:
+                     # The token after '(' is not ')' or an identifier, so it's not an anonymous function parameter list.
+                     # Rewind and parse as a regular parenthesized expression.
+                     self.pos = original_pos # Rewind to before the initial '('
+
+                # --- END MODIFICATION ---
+
+                # If it wasn't an anonymous function, parse as a regular parenthesized expression
+                self.eat('(') # Consume '(' again for regular parsing
+                expr = self.parse_expression(0)
+                if self.current() != ')':
+                    raise SyntaxError(f"Syntax error on line {self.current_line_num()}: missing closing parenthesis")
+                self.eat(')')
+                left = expr
+
+            except SyntaxError as e:
+                 # If a syntax error occurred during the initial '(' handling (and not the internal check),
+                 # restore the position and re-raise.
+                 self.pos = original_pos
+                 raise e
+
+
         elif token and token.startswith("'") and token.endswith("'"):
             self.eat(token)
             left = StringLiteral(token[1:-1], line_num)
@@ -949,6 +1044,57 @@ class ObjectInstance:
     def __repr__(self):
         # Simple representation for printing
         return f"Instance({self.class_def.name}, data={self.data})"
+# --- END NEW ---
+
+# --- NEW: Define a callable representation for functions (global, methods, anonymous) ---
+class Callable:
+    """Represents a callable function or method."""
+    def __init__(self, params, body, is_method=False, instance=None, line_num=None):
+        self.params = params
+        self.body = body
+        self.is_method = is_method # True if it's a method
+        self.instance = instance # The object instance if it's a method
+        self.line_num = line_num # Store the line number of the definition
+
+    def __call__(self, *args):
+        """Allows calling the Callable object like a function."""
+        # Create a new local scope for this function call
+        call_local_vars = {}
+
+        # Bind 'self' for methods
+        if self.is_method:
+             if not self.params or self.params[0] != 'self':
+                  # This should ideally be caught during parsing/definition, but as a safeguard:
+                  raise Exception(f"Internal Error: Method definition missing 'self' parameter.")
+             call_local_vars[self.params[0]] = self.instance
+             expected_params = self.params[1:] # Exclude 'self' when checking argument count
+        else:
+             expected_params = self.params
+
+        # Check argument count
+        if len(expected_params) != len(args):
+             # Provide a more specific error message for function/method calls
+             callable_name = self.body.name if isinstance(self.body, FunctionDef) else "anonymous function"
+             raise Exception(f"Runtime error on line {self.line_num}: Callable '{callable_name}' expects {len(expected_params)} arguments, but got {len(args)}")
+
+
+        # Bind arguments to parameters in the local scope
+        for i, param in enumerate(expected_params):
+            call_local_vars[param] = args[i]
+
+        # Evaluate the function/method body in the new local scope
+        try:
+            result = evaluate(self.body, call_local_vars)
+            return result
+        except ReturnValue as rv:
+            return rv.value # Catch and return the value from a ReturnStatement
+
+    def __repr__(self):
+        # Representation for printing the callable itself
+        callable_type = "Method" if self.is_method else "Function"
+        name = self.body.name if isinstance(self.body, FunctionDef) else "anonymous"
+        return f"<{callable_type}: {name}>"
+
 # --- END NEW ---
 
 
@@ -1140,9 +1286,11 @@ def evaluate(ast, local_vars=None):
                       formatted_args.append(f"'{arg}'") # Include quotes for string literals in print output
                  elif arg is None: # Handle printing of null
                       formatted_args.append("null")
-                 # --- NEW: Handle printing of ObjectInstance ---
+                 # --- NEW: Handle printing of ObjectInstance and Callable ---
                  elif isinstance(arg, ObjectInstance):
                       formatted_args.append(repr(arg)) # Use the ObjectInstance's __repr__
+                 elif isinstance(arg, Callable):
+                      formatted_args.append(repr(arg)) # Use the Callable's __repr__
                  # --- END NEW ---
                  else:
                       formatted_args.append(str(arg))
@@ -1163,16 +1311,17 @@ def evaluate(ast, local_vars=None):
              # --- End Implementation for input() ---
 
         # Normal global function call handling:
-        func = function_table.get(ast.name)
-        if not func:
-            raise Exception(f"Runtime error on line {ast.line_num}: Undefined function '{ast.name}'")
-        if len(func.params) != len(ast.args):
-            # Matches rubric example for incorrect number of arguments
-            raise Exception(f"Runtime error on line {ast.line_num}: Function '{ast.name}' expects {len(func.params)} arguments, but got {len(ast.args)}")
+        # --- MODIFICATION: Lookup callable in symbol_table first ---
+        callable_obj = get_variable(ast.name, ast.line_num) # Get the callable object from the symbol table
+        if not isinstance(callable_obj, Callable) or callable_obj.is_method:
+             # If it's not a Callable or it's a method (which should be called via MethodCall), raise an error
+             raise TypeError(f"Runtime error on line {ast.line_num}: '{ast.name}' is not a callable function")
+
+        # Evaluate arguments before calling
         evaluated_args = [evaluate(arg, local_vars) for arg in ast.args]
-        new_locals = {param: evaluated_args[i] for i, param in enumerate(func.params)}
-        # Evaluate the function body with the new local scope
-        return evaluate(func.body, new_locals)
+
+        # Call the callable object
+        return callable_obj(*evaluated_args)
         # --- END MODIFICATION ---
 
     elif isinstance(ast, MemberAccess):
@@ -1188,9 +1337,9 @@ def evaluate(ast, local_vars=None):
                   return base_obj.data[member_name]
              # Check if the member is a method
              if member_name in base_obj.class_def.methods:
-                  # When accessing a method, return the method definition itself
-                  # The MethodCall AST node will handle calling it.
-                  return base_obj.class_def.methods[member_name]
+                  # When accessing a method, return a Callable instance bound to the object
+                  method_def = base_obj.class_def.methods[member_name]
+                  return Callable(method_def.params, method_def.body, is_method=True, instance=base_obj, line_num=method_def.line_num)
              # If not found as data or method, it's an error
              raise AttributeError(f"Runtime error on line {ast.line_num}: Object of type '{base_obj.class_def.name}' has no member '{member_name}'")
 
@@ -1310,13 +1459,12 @@ def evaluate(ast, local_vars=None):
         # If there was an 'init' method, we would evaluate it here:
         # constructor = class_def.methods.get('init')
         # if constructor:
-        #      if len(constructor.params) != len(ast.args) + 1: # +1 for 'self'
+        #      # Create a bound method callable for the constructor
+        #      constructor_callable = Callable(constructor.params, constructor.body, is_method=True, instance=instance, line_num=constructor.line_num)
+        #      if len(constructor.params) - 1 != len(ast.args): # -1 for 'self'
         #           raise Exception(f"Runtime error on line {ast.line_num}: Constructor '{class_name}.init' expects {len(constructor.params) - 1} arguments, but got {len(ast.args)}")
         #      evaluated_args = [evaluate(arg, local_vars) for arg in ast.args]
-        #      constructor_locals = {constructor.params[0]: instance} # Map 'self'
-        #      for i, arg_val in enumerate(evaluated_args):
-        #           constructor_locals[constructor.params[i+1]] = arg_val
-        #      evaluate(constructor.body, constructor_locals)
+        #      constructor_callable(*evaluated_args) # Call the constructor
 
         return instance # Return the newly created instance
     # --- END NEW ---
@@ -1325,6 +1473,7 @@ def evaluate(ast, local_vars=None):
         """
         Evaluates a method call on an object instance.
         """
+        # Evaluate the base object first to get the instance
         instance_obj = evaluate(ast.base, local_vars)
         method_name = ast.method_name
 
@@ -1337,25 +1486,27 @@ def evaluate(ast, local_vars=None):
         if not method_def:
              raise AttributeError(f"Runtime error on line {ast.line_num}: Object of type '{class_def.name}' has no method '{method_name}'")
 
-        # Check number of arguments (+1 for 'self')
-        if len(method_def.params) != len(ast.args) + 1:
+        # Create a bound method (Callable instance tied to the object instance)
+        method_callable = Callable(method_def.params, method_def.body, is_method=True, instance=instance_obj, line_num=method_def.line_num)
+
+        # Check number of arguments (excluding 'self')
+        if len(method_def.params) - 1 != len(ast.args):
              raise Exception(f"Runtime error on line {ast.line_num}: Method '{class_def.name}.{method_name}' expects {len(method_def.params) - 1} arguments, but got {len(ast.args)}")
 
         evaluated_args = [evaluate(arg, local_vars) for arg in ast.args]
 
-        # Create a new local scope for the method execution
-        method_locals = {method_def.params[0]: instance_obj} # Map the first parameter (self) to the instance
-        for i, arg_val in enumerate(evaluated_args):
-             method_locals[method_def.params[i+1]] = arg_val # Map remaining parameters to evaluated arguments
+        # Call the bound method
+        return method_callable(*evaluated_args)
 
-        # Evaluate the method's body in the new local scope
-        # Handle return values from the method
-        try:
-             result = evaluate(method_def.body, method_locals)
-             return result # Return the result of the method execution
-        except ReturnValue as rv:
-             return rv.value # Catch and return the value from a ReturnStatement
-
+    # --- END NEW ---
+    # --- NEW: Evaluation Logic for Anonymous Function ---
+    elif isinstance(ast, AnonymousFunction):
+        """
+        Evaluates an anonymous function definition. Returns a callable object.
+        """
+        # Evaluating an anonymous function node returns a Callable object
+        # This Callable object wraps the parameters and body of the anonymous function.
+        return Callable(ast.params, ast.body, is_method=False, instance=None, line_num=ast.line_num)
     # --- END NEW ---
     elif isinstance(ast, ReturnStatement):
         # In a real interpreter, this would stop the function execution and return the value.
